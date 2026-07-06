@@ -1,2 +1,2 @@
 # rustbook_examples
-Examples from the official rust book
+A collection of the examples i worked through whilst reading the official rust book
