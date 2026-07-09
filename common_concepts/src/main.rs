@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{fmt::Result, io};
+use std::io;
 
 fn main() {
     let mut input = String::new();
