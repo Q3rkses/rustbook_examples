@@ -3,27 +3,35 @@ use std::env;
 use std::error::Error;
 use std::fs;
 
+const MAX_FILE_SIZE: u64 = 1 * 1024 * 1024;
+
 pub struct Config {
     pub query: String,
     pub file_path: String,
     pub ignore_case: bool,
+    pub show_hidden: bool,
 }
 
 impl Config {
-    pub fn build(args: &[String]) -> Result<Config, &'static str> {
-        if args.len() < 2 {
-            return Err("not enough arguments");
-        }
+    pub fn build(mut args: impl Iterator<Item = String>) -> Result<Config, &'static str> {
+        args.next();
 
-        // ignore argument 0 as that i the path of the calling process
-        let query = args[1].clone();
-        let file_path: String = args.get(2).cloned().unwrap_or_else(|| ".".to_string());
+        let query = match args.next() {
+            Some(arg) => arg,
+            None => return Err("Didn't get a query string"),
+        };
+        let file_path = match args.next() {
+            Some(arg) => arg,
+            None => ".".to_string(),
+        };
         let ignore_case = env::var("IGNORE_CASE").is_ok();
+        let show_hidden = env::var("SHOW_HIDDEN").is_ok();
 
         Ok(Config {
             query,
             file_path,
             ignore_case,
+            show_hidden,
         })
     }
 }
@@ -66,53 +74,65 @@ pub fn search_case_insensitive<'a>(
     results
 }
 
-pub fn search_directory(config: Config) -> Result<(), Box<dyn Error>> {
+pub fn search_directory(
+    query: &str,
+    dir: &str,
+    ignore_case: bool,
+    show_hidden: bool,
+) -> std::io::Result<Vec<String>> {
     let mut results = Vec::new();
 
-    for entry in fs::read_dir(config.file_path)? {
+    for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
 
-        // non-recursive: anything that isn't a regular file gets skipped, never descended into
-        if !path.is_file() {
+        if entry.file_type()?.is_symlink() {
             continue;
         }
 
-        let contents = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+        if !show_hidden {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+        }
 
-        let path_str = path.to_string_lossy().to_string();
+        if path.is_dir() {
+            let sub_dir = path.to_string_lossy();
+            let mut sub_results = search_directory(query, &sub_dir, ignore_case, show_hidden)?;
+            results.append(&mut sub_results);
+        } else if path.is_file() {
+            if entry.metadata()?.len() > MAX_FILE_SIZE {
+                continue;
+            }
 
-        let mut matches = if config.ignore_case {
-            search_case_insensitive(&config.query, &contents, &path_str)
-        } else {
-            search(&config.query, &contents, &path_str)
-        };
+            let contents = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
 
-        results.append(&mut matches);
+            let path_str = path.to_string_lossy().to_string();
+
+            let mut matches = if ignore_case {
+                search_case_insensitive(query, &contents, &path_str)
+            } else {
+                search(query, &contents, &path_str)
+            };
+
+            results.append(&mut matches);
+        }
     }
-
-    for line in results {
-        println!("{line}");
-    }
-    Ok(())
+    Ok(results)
 }
 
-pub fn search_file(config: Config) -> Result<(), Box<dyn Error>> {
+pub fn search_file(config: Config) -> Result<Vec<String>, Box<dyn Error>> {
     let contents = fs::read_to_string(&config.file_path)?;
-
     let results = if config.ignore_case {
         search_case_insensitive(&config.query, &contents, &config.file_path)
     } else {
         search(&config.query, &contents, &config.file_path)
     };
-
-    for line in results {
-        println!("{line}");
-    }
-    Ok(())
+    Ok(results)
 }
 
 #[cfg(test)]
@@ -132,7 +152,7 @@ Trust me.";
             "frog".to_string(),
             "poems/poem.txt".to_string(),
         ];
-        let config = Config::build(&args).unwrap();
+        let config = Config::build(args.into_iter()).unwrap();
 
         assert_eq!(config.query, "frog");
         assert_eq!(config.file_path, "poems/poem.txt");
@@ -141,7 +161,7 @@ Trust me.";
     #[test]
     fn build_defaults_path_to_current_dir() {
         let args = vec!["minigrep".to_string(), "frog".to_string()];
-        let config = Config::build(&args).unwrap();
+        let config = Config::build(args.into_iter()).unwrap();
 
         assert_eq!(config.file_path, ".");
     }
@@ -149,7 +169,7 @@ Trust me.";
     #[test]
     fn build_errors_without_query() {
         let args = vec!["minigrep".to_string()];
-        assert!(Config::build(&args).is_err());
+        assert!(Config::build(args.into_iter()).is_err());
     }
 
     #[test]
